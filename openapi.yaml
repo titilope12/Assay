@@ -54,10 +54,22 @@ paths:
             account ID), or an asset identifier naming the
             network's native asset (native/XLM), which has no issuer and no
             authorization flags and is therefore never scanned or attested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '404':
           description: Asset not found on the ledger.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '502':
           description: Upstream scan failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/v1/history:
     get:
       summary: Read an asset's recorded observations and derived transitions
@@ -109,6 +121,10 @@ paths:
           description: Asset not found on the ledger.
         '502':
           description: Upstream scan failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/v1/exposure:
     get:
       summary: List trustlines held by an account with per-asset severity and trustline finding
@@ -150,12 +166,28 @@ paths:
                 $ref: '#/components/schemas/Exposure'
         '400':
           description: Missing or invalid account, limit, or cursor.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '404':
           description: Account not found on the ledger.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           description: Rate limited. Retry-After header gives seconds to wait.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '502':
           description: The account's trustline list could not be fetched.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /metrics:
     get:
       summary: Scan outcome and per-source failure counters
@@ -256,6 +288,27 @@ components:
           type: string
           enum: [undetermined, unevaluated, stale, inconsistent, partial_check_set, scan_failed]
           description: Machine-readable refusal kind; present when attestable is false.
+    Error:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Human-readable description of the problem.
+        code:
+          type: string
+          description: >-
+            Stable machine-readable identifier for the error type.
+            Consumers should branch on this field, not on the error message.
+          enum:
+            - missing_param
+            - invalid_asset
+            - invalid_holder
+            - invalid_param
+            - asset_not_found
+            - account_not_found
+            - upstream_unavailable
+            - rate_limited
     Severity:
       type: string
       description: >-

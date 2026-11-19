@@ -122,7 +122,7 @@ func (s *Server) Handler() http.Handler {
 		}
 		mux.HandleFunc(route, handler)
 	}
-	return s.withObservability(mux)
+	return s.withObservability(s.withCORS(mux))
 }
 
 func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
@@ -139,27 +139,45 @@ func (s *Server) handleUI(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(b)
 }
 
+// Error codes. These are the stable identifiers API consumers should branch on;
+// the human-readable error message may change, the code will not.
+const (
+	codeAssetNotFound   = "asset_not_found"
+	codeAccountNotFound = "account_not_found"
+	codeInvalidAsset    = "invalid_asset"
+	codeInvalidHolder   = "invalid_holder"
+	codeInvalidParam    = "invalid_param"
+	codeMissingParam    = "missing_param"
+	codeUpstreamUnavail = "upstream_unavailable"
+	codeRateLimited     = "rate_limited"
+)
+
 type errorBody struct {
 	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+func apiErr(code, message string) errorBody {
+	return errorBody{Error: message, Code: code}
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("asset")
 	if raw == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody{"missing ?asset=CODE-ISSUER"})
+		writeJSON(w, http.StatusBadRequest, apiErr(codeMissingParam, "missing ?asset=CODE-ISSUER"))
 		return
 	}
 
 	asset, err := scan.ParseAsset(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody{err.Error()})
+		writeJSON(w, http.StatusBadRequest, apiErr(codeInvalidAsset, err.Error()))
 		return
 	}
 
 	holder := r.URL.Query().Get("holder")
 	if holder != "" {
 		if err := scan.ValidateHolder(holder); err != nil {
-			writeJSON(w, http.StatusBadRequest, errorBody{err.Error()})
+			writeJSON(w, http.StatusBadRequest, apiErr(codeInvalidHolder, err.Error()))
 			return
 		}
 	}
@@ -171,7 +189,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	if maxAgeParam != "" {
 		secs, err := strconv.ParseInt(maxAgeParam, 10, 64)
 		if err != nil || secs < 0 {
-			writeJSON(w, http.StatusBadRequest, errorBody{"invalid max_age_secs"})
+			writeJSON(w, http.StatusBadRequest, apiErr(codeInvalidParam, "invalid max_age_secs"))
 			return
 		}
 	}
@@ -190,7 +208,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		if errors.Is(err, horizon.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, errorBody{"asset not found on the ledger"})
+			writeJSON(w, http.StatusNotFound, apiErr(codeAssetNotFound, "asset not found on the ledger"))
 			return
 		}
 		// The per-request logger is used so this line carries the same
@@ -199,7 +217,7 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		// The upstream error is returned rather than a generic message: a user
 		// deciding whether to trust an asset needs to know the difference
 		// between "safe" and "we could not check".
-		writeJSON(w, http.StatusBadGateway, errorBody{"scan failed: " + err.Error()})
+		writeJSON(w, http.StatusBadGateway, apiErr(codeUpstreamUnavail, "scan failed: "+err.Error()))
 		return
 	}
 

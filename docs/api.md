@@ -15,12 +15,48 @@ the exposure page, the operational probes, and a single-file UI.
   endpoint below; when the two disagree about a field name or a status code,
   the OpenAPI document wins and this page is the bug.
 
+## CORS Policy
+
+Every `/api/v1/*` path sets `Access-Control-Allow-Origin: *`. Browser
+front-end integrators may call the read-only GET endpoints cross-origin
+without a proxy. Preflight `OPTIONS` requests to any `/api/` path are
+answered with `204 No Content`. The UI is served same-origin and does not
+carry these headers.
+
+Exposed response headers: `X-Request-Id`, `X-Assay-Undetermined`,
+`Retry-After`.
+
+## Error Bodies
+
+Every error response includes a stable `code` field alongside the
+human-readable `error` message. Consumers should branch on `code`, not on
+the message text.
+
+```json
+{
+  "error": "missing ?asset=CODE-ISSUER",
+  "code": "missing_param"
+}
+```
+
+| Code | Meaning |
+| --- | --- |
+| `missing_param` | A required query parameter was not supplied. |
+| `invalid_asset` | The `asset` parameter is not a valid `CODE-ISSUER` pair. |
+| `invalid_holder` | The `holder` or `account` parameter is not a valid `G…` address. |
+| `invalid_param` | Another parameter value is out of range or malformed. |
+| `asset_not_found` | The asset does not exist on the ledger. |
+| `account_not_found` | The account does not exist on the ledger. |
+| `upstream_unavailable` | A required upstream call (Horizon, StellarExpert) failed. |
+| `rate_limited` | The client has exceeded the exposure rate limit; see `Retry-After`. |
+
 ## Conventions
 
 - Every response body is JSON, utf-8 encoded, except `GET /` (HTML) and
   `GET /healthz` (plain text).
-- Errors are `{"error": "<message>"}` with the status code doing the
-  classification; no endpoint signals failure with `200` and a message.
+- Errors carry `{"error": "<message>", "code": "<stable-code>"}` with the
+  HTTP status doing the classification; no endpoint signals failure with
+  `200` and a message. See [Error Bodies](#error-bodies) for the code set.
 - The scan response **is** the report, unwrapped. It carries `schema_version`,
   the payload contract version, which is independent of the `/api/v1` route
   version: a CLI consumer never sees the route, so the report carries its own

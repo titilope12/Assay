@@ -532,3 +532,20 @@ the subject's `metadata.json`, the manifest and provenance together, add or
 adjust the evaluation assertion, and record the reason for the correction. A
 disagreement without sufficient evidence remains `unresolved` in the
 correction record and is excluded from claims about model accuracy.
+
+## Release artifact
+
+Each tagged release publishes `eval-dataset.tar.gz` and its SHA-256
+checksum as release assets. The archive contains the full contents of
+`internal/mechanics/testdata/` — fixtures, `manifest.json`, `PROVENANCE.md`,
+and `LICENSE` — so the dataset can be cited and reused without cloning the
+repository.
+
+```
+eval-dataset.tar.gz
+eval-dataset.tar.gz.sha256
+```
+
+The dataset is licensed under Creative Commons Attribution 4.0 (see
+`LICENSE` inside the archive). The checksum is SHA-256 of the gzip stream,
+computed by `sha256sum` and reproduced verbatim in the `.sha256` file.

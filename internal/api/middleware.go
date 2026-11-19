@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"log/slog"
 	"net/http"
+	"strings"
 )
 
 // Every scan answer must be correlatable with the log line that describes it.
@@ -87,4 +88,29 @@ func (s *Server) loggerFrom(ctx context.Context) *slog.Logger {
 		return s.Log
 	}
 	return slog.Default()
+}
+
+// withCORS applies a permissive CORS policy to every /api/ path: browser
+// front-end integrators call the same read-only GET endpoints that server
+// clients use. The UI is served same-origin and does not need these headers,
+// so they are limited to /api/ prefixes rather than applied globally.
+//
+// Policy: Allow-Origin: * (GET only, public data). Preflight OPTIONS is
+// answered with 204 and no body. The Allow-Headers list covers the
+// X-Request-Id input header the middleware accepts; the Expose-Headers list
+// covers the response headers consumers read.
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Accept, "+requestIDHeader)
+			w.Header().Set("Access-Control-Expose-Headers", requestIDHeader+", X-Assay-Undetermined, Retry-After")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }

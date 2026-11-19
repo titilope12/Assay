@@ -1,0 +1,89 @@
+name: Eval subject
+description: Propose a new asset for the labelled evaluation set.
+labels: ["area:eval"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        The eval set measures the **judgment** of the severity model — whether
+        it separates a trap from a legitimate compliance feature. Each subject
+        must carry a label and evidence for it. A subject without evidence
+        cannot be added, because the label would be an assertion rather than a
+        measurement.
+
+
+        Review the existing set and label criteria in
+        [docs/eval.md](https://github.com/use-assay/Assay/blob/main/docs/eval.md)
+        before filing. Labels are `legitimate`, `legitimate (uses the flags)`,
+        `trap`, `degraded`, or `synthetic`.
+
+  - type: input
+    id: asset
+    attributes:
+      label: Asset (CODE-ISSUER)
+      description: >-
+        The asset to add, in `CODE-ISSUER` form. Use pubnet addresses unless
+        proposing a synthetic subject.
+      placeholder: "USDC-GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: label
+    attributes:
+      label: Proposed label
+      description: >-
+        The expected outcome this subject measures. `legitimate (uses the flags)`
+        is the critical case: the model must not escalate an asset solely because
+        it carries authorization flags.
+      options:
+        - "legitimate"
+        - "legitimate (uses the flags)"
+        - "trap"
+        - "degraded"
+        - "synthetic"
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why this subject belongs in the set
+      description: >-
+        What gap in the existing set does this subject fill? Name the scenario
+        it pins — do not say "another legitimate stablecoin" if USDC and USDZ
+        already cover that case.
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence for the label
+      description: >-
+        Live-source verification of the flags, `home_domain`, and SEP-0001
+        status that justify the proposed label. Captured records preferred over
+        links that may change. Cite the field names from the Horizon account
+        response or the TOML — not reputation or folklore.
+    validations:
+      required: true
+
+  - type: textarea
+    id: source_urls
+    attributes:
+      label: Source URLs
+      description: >-
+        Links to the Horizon account record, the stellar.toml, and any
+        StellarExpert or regulatory page consulted. One URL per line.
+    validations:
+      required: false
+
+  - type: textarea
+    id: fixture
+    attributes:
+      label: Proposed fixture path
+      description: >-
+        Suggested directory name under `internal/mechanics/testdata/`, following
+        the `<subject>-<brief-label>` convention (e.g. `usdc-revocable-regulated`).
+    validations:
+      required: false
