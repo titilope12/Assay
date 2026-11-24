@@ -136,6 +136,14 @@ func TestSequencesProduceExpectedTransitions(t *testing.T) {
 		baseBefore, baseAfter         mechanics.Severity
 		severityBefore, severityAfter mechanics.Severity
 
+		// deescalation is whether the pair must emit a typed de-escalation,
+		// and deescalationSources are the sources it must name.
+		deescalation        bool
+		deescalationSources []string
+
+		accountabilityFrom, accountabilityTo mechanics.Accountability
+		accountabilityChanged                bool
+
 		// mechanicsMoved records whether anything in the full bitset moved, so
 		// a sequence in which nothing at all changed cannot be asserted as an
 		// evidence-only change, and vice versa.
@@ -212,6 +220,39 @@ func TestSequencesProduceExpectedTransitions(t *testing.T) {
 			mechanicsMoved: true,
 			reasonContains: "reputation",
 		},
+		{
+			dir:   "seq7-withdrawn-listing",
+			why:   "a curated listing was withdrawn: final severity falls and the transition names the source",
+			state: temporal.Valid,
+
+			added:       0,
+			attribution: temporal.AttributionReputation,
+
+			baseBefore: mechanics.Clear, baseAfter: mechanics.Clear,
+			severityBefore: mechanics.Critical, severityAfter: mechanics.Clear,
+
+			deescalation:        true,
+			deescalationSources: []string{"stellar.expert/directory"},
+
+			mechanicsMoved: true,
+		},
+		{
+			dir:   "seq6-accountability-change",
+			why:   "the public claim was lost: no capability or severity moved, but who claims the asset did",
+			state: temporal.Valid,
+
+			added:       0,
+			attribution: temporal.AttributionNone,
+
+			baseBefore: mechanics.Clear, baseAfter: mechanics.Clear,
+			severityBefore: mechanics.Clear, severityAfter: mechanics.Clear,
+
+			mechanicsMoved: false,
+
+			accountabilityFrom:    mechanics.AccountabilityVerified,
+			accountabilityTo:      mechanics.AccountabilityUnverified,
+			accountabilityChanged: true,
+		},
 	}
 
 	asserted := map[string]bool{}
@@ -270,11 +311,34 @@ func TestSequencesProduceExpectedTransitions(t *testing.T) {
 			if sev.Attribution != tc.attribution {
 				t.Errorf("attribution = %q, want %q", sev.Attribution, tc.attribution)
 			}
+			// The detector runs over the same committed fixtures as every
+			// other axis, including the partially observed sequence.
+			acct := temporal.AccountabilityTransition(tr.From, tr.To)
+			if acct.State != tc.state {
+				t.Errorf("accountability state = %q, want %q: %s", acct.State, tc.state, acct.Reason)
+			}
+			if tr.Accountability != acct {
+				t.Errorf("transition accountability = %+v, want %+v", tr.Accountability, acct)
+			}
+			if tc.state != temporal.Valid {
+				if acct.Changed || acct.From != "" || acct.To != "" || acct.Reason == "" {
+					t.Errorf("a %q transition reported an accountability movement: %+v", tc.state, acct)
+				}
+			} else if acct.From != tc.accountabilityFrom || acct.To != tc.accountabilityTo ||
+				acct.Changed != tc.accountabilityChanged {
+				t.Errorf("accountability = %s -> %s (changed %t), want %s -> %s (changed %t)",
+					acct.From, acct.To, acct.Changed,
+					tc.accountabilityFrom, tc.accountabilityTo, tc.accountabilityChanged)
+			}
+
 			if tc.state != temporal.Valid {
 				// A comparison that could not be made must not report a
 				// movement: the fields stay empty rather than guessing.
 				if sev.BaseBefore != 0 || sev.BaseAfter != 0 || sev.Before != 0 || sev.After != 0 {
 					t.Errorf("a %q transition reported a severity movement: %+v", tc.state, sev)
+				}
+				if sev.Deescalation != nil {
+					t.Errorf("a %q transition reported a de-escalation: %+v", tc.state, sev.Deescalation)
 				}
 				return
 			}
@@ -285,6 +349,31 @@ func TestSequencesProduceExpectedTransitions(t *testing.T) {
 			if sev.Before != tc.severityBefore || sev.After != tc.severityAfter {
 				t.Errorf("severity = %v -> %v, want %v -> %v",
 					sev.Before, sev.After, tc.severityBefore, tc.severityAfter)
+			}
+
+			// A severity decrease is typed and attributed, exactly when it
+			// happened. The transition and the standalone severity detector
+			// must agree, or one surface would report a fall the other hides.
+			if got := sev.Deescalation != nil; got != tc.deescalation {
+				t.Errorf("deescalation present = %t, want %t", got, tc.deescalation)
+			}
+			if tr.Deescalation != nil || sev.Deescalation != nil {
+				if tr.Deescalation == nil || sev.Deescalation == nil {
+					t.Fatalf("transition and severity detector disagree on de-escalation: %v vs %v",
+						tr.Deescalation, sev.Deescalation)
+				}
+				if !slices.Equal(sev.Deescalation.Sources, tc.deescalationSources) {
+					t.Errorf("deescalation sources = %v, want %v",
+						sev.Deescalation.Sources, tc.deescalationSources)
+				}
+				if sev.Deescalation.From != tc.severityBefore || sev.Deescalation.To != tc.severityAfter {
+					t.Errorf("deescalation %v -> %v, want %v -> %v",
+						sev.Deescalation.From, sev.Deescalation.To,
+						tc.severityBefore, tc.severityAfter)
+				}
+				if sev.Deescalation.Reason == "" {
+					t.Error("a de-escalation must say why, or it is indistinguishable from a silent downgrade")
+				}
 			}
 		})
 	}

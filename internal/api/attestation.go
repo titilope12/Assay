@@ -32,13 +32,13 @@ type attestationBody struct {
 func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	raw := r.URL.Query().Get("asset")
 	if raw == "" {
-		writeJSON(w, http.StatusBadRequest, errorBody{"missing ?asset=CODE-ISSUER"})
+		writeJSON(w, http.StatusBadRequest, apiErr(codeMissingParam, "missing ?asset=CODE-ISSUER"))
 		return
 	}
 
 	asset, err := scan.ParseAsset(raw)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, errorBody{err.Error()})
+		writeJSON(w, http.StatusBadRequest, apiErr(codeInvalidAsset, err.Error()))
 		return
 	}
 
@@ -48,11 +48,11 @@ func (s *Server) handleAttestation(w http.ResponseWriter, r *http.Request) {
 	rep, scanErr := s.Scanner.ScanWithHolder(ctx, asset, "")
 	if scanErr != nil {
 		if errors.Is(scanErr, horizon.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, errorBody{"asset not found on the ledger"})
+			writeJSON(w, http.StatusNotFound, apiErr(codeAssetNotFound, "asset not found on the ledger"))
 			return
 		}
 		s.loggerFrom(r.Context()).Error("attestation scan failed", "asset", asset.String(), "err", scanErr)
-		writeJSON(w, http.StatusBadGateway, errorBody{"scan failed: " + scanErr.Error()})
+		writeJSON(w, http.StatusBadGateway, apiErr(codeUpstreamUnavail, "scan failed: "+scanErr.Error()))
 		return
 	}
 

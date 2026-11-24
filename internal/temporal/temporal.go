@@ -152,6 +152,18 @@ type Transition struct {
 	SeverityAfter  mechanics.Severity `json:"severity_after"`
 	// Attribution names which axis moved severity, if any.
 	Attribution Attribution `json:"attribution"`
+	// Deescalation is set exactly when final severity fell between the two
+	// observations. It is the typed, attributed form of a severity decrease:
+	// it names the source whose claim was withdrawn, so a consumer does not
+	// have to diff evidence by hand to see why an asset came down. Absent means
+	// severity did not fall, not that the comparison could not be made (State
+	// says that). See Deescalation.
+	Deescalation *Deescalation `json:"deescalation,omitempty"`
+
+	// Accountability is the change in who publicly claims the asset, independent
+	// of severity. It carries from/to values and the same State as the pair, so
+	// an undetermined observation yields no verdict on this axis either.
+	Accountability AccountabilityMovement `json:"accountability"`
 }
 
 // Between derives the transition from one observation to the next.
@@ -173,19 +185,19 @@ func Between(from, to Observation) Transition {
 		t.Reason = "fewer than two observations: a transition is the difference " +
 			"between two points in time, and only one is present here. This is " +
 			"not a no-change result."
-		return t
+		return finish(t)
 	case t.From.At.Equal(t.To.At):
 		t.State = Unknown
 		t.Reason = "both observations carry the same timestamp, so neither is " +
 			"later than the other and the direction of the change is undefined. " +
 			"This is not a no-change result."
-		return t
+		return finish(t)
 	case t.From.Undetermined || t.To.Undetermined:
 		t.State = Unknown
 		t.Reason = "an observation is undetermined because a source did not " +
 			"answer, so what it omits must not be read as unchanged. " +
 			undeterminedReason(t.From, t.To)
-		return t
+		return finish(t)
 	}
 
 	t.State = Valid
@@ -198,6 +210,15 @@ func Between(from, to Observation) Transition {
 	t.BaseBefore, t.BaseAfter = t.From.Base, t.To.Base
 	t.SeverityBefore, t.SeverityAfter = t.From.Severity, t.To.Severity
 	t.Attribution = attribution(t.From, t.To)
+	t.Deescalation = deescalation(t)
+	return finish(t)
+}
+
+// finish attaches the accountability movement to a transition whose state and
+// pair are already settled. It is the single exit from Between so every state,
+// including the ones where no comparison could be made, carries the axis.
+func finish(t Transition) Transition {
+	t.Accountability = accountabilityMovement(t)
 	return t
 }
 

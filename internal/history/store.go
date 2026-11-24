@@ -28,6 +28,16 @@
 //     observation is the one a consumer is least likely to need. The cap is
 //     reported in every API response, so a history that has reached it is
 //     visible to a consumer rather than passing as complete.
+//
+//   - The store is bounded globally as well as per asset. A per-asset cap
+//     alone bounds nothing in aggregate: every distinct asset scanned through
+//     the public API adds up to DefaultRetention records and the whole file is
+//     rewritten on each append, so an instance could be driven to an
+//     arbitrarily large file and O(n) write cost by scanning many assets. The
+//     number of assets kept is capped (DefaultMaxAssets) and the asset whose
+//     observations are least recent is evicted whole, which keeps every
+//     retained asset's per-asset history intact. Both bounds are reported in
+//     every API response. See docs/history.md.
 package history
 
 import (
@@ -54,6 +64,34 @@ import (
 // more than this many observations exist for one asset, the oldest are dropped.
 const DefaultRetention = 256
 
+// DefaultMaxAssets is the greatest number of assets the store keeps
+// observations for.
+//
+// It exists so the log file has a global bound, not only a per-asset one: with
+// DefaultRetention observations per asset, the log can therefore never exceed
+// DefaultMaxAssets × DefaultRetention records. Eviction is whole-asset and
+// oldest-observed-first — the asset whose most recent observation is oldest is
+// dropped, so an asset being scanned now is never the one evicted by a burst of
+// new assets. It is deliberately generous relative to the ~20 assets Assay has
+// ever scanned, and, like DefaultRetention, it is a bound against unbounded
+// growth rather than a space-saving choice.
+//
+// An evicted asset's history reads as `missing`, exactly like an asset that was
+// never scanned. That is why the bound is reported in every response: a
+// consumer of a deployment that has reached the cap must read `missing` as
+// "not retained" rather than "never observed". docs/history.md records the
+// consequences.
+const DefaultMaxAssets = 512
+
+var (
+	// ErrLocked reports that another process already holds the history's
+	// single-writer lock. Callers can match it with errors.Is to turn startup
+	// into a clear refusal rather than a generic I/O failure.
+	ErrLocked = errors.New("history: already in use by another process")
+	// ErrClosed reports use of a store after Close released its writer lock.
+	ErrClosed = errors.New("history: store is closed")
+)
+
 // Store is an append-only, per-asset sequence of observations, ordered by time.
 //
 // The zero value is not usable; use New or Open. All methods are safe for
@@ -64,6 +102,9 @@ type Store struct {
 	byAsset   map[string][]temporal.Observation
 	path      string
 	retention int
+	maxAssets int
+	lock      *os.File
+	closed    bool
 }
 
 // New returns an in-memory Store that retains DefaultRetention observations per
@@ -77,10 +118,24 @@ func New() *Store { return NewWithRetention(DefaultRetention) }
 // "keep nothing", because silently retaining nothing would present as a
 // permanently empty history.
 func NewWithRetention(n int) *Store {
+	return NewWithLimits(n, DefaultMaxAssets)
+}
+
+// NewWithLimits returns an in-memory Store bounded to n observations per asset
+// and m assets overall. A non-positive n or m is replaced by its default rather
+// than treated as "keep nothing", for the same reason NewWithRetention gives.
+func NewWithLimits(n, m int) *Store {
 	if n <= 0 {
 		n = DefaultRetention
 	}
-	return &Store{byAsset: map[string][]temporal.Observation{}, retention: n}
+	if m <= 0 {
+		m = DefaultMaxAssets
+	}
+	return &Store{
+		byAsset:   map[string][]temporal.Observation{},
+		retention: n,
+		maxAssets: m,
+	}
 }
 
 // Open returns a Store persisted to path as a JSON Lines log, loading whatever
@@ -90,6 +145,10 @@ func NewWithRetention(n int) *Store {
 // exist yet is not an error — the log is created on the first append — because
 // "no history yet" and "the history file is broken" are different facts and the
 // first must not fail startup.
+//
+// A file-backed store takes an exclusive advisory lock on a sidecar ".lock"
+// file at open time and refuses a second writer with ErrLocked. Call Close to
+// release it; on platforms without flock the lock is a documented no-op.
 func Open(path string) (*Store, error) {
 	return OpenWithRetention(path, DefaultRetention)
 }
@@ -97,11 +156,35 @@ func Open(path string) (*Store, error) {
 // OpenWithRetention is Open with an explicit per-asset retention bound, for a
 // deployment that wants a different one than DefaultRetention.
 func OpenWithRetention(path string, n int) (*Store, error) {
-	s := NewWithRetention(n)
+	return OpenWithLimits(path, n, DefaultMaxAssets)
+}
+
+// OpenWithLimits is Open with explicit per-asset and global bounds, for a
+// deployment that wants different ones than the defaults. The global bound is
+// applied while loading, so a log written under a larger bound is rewritten to
+// the smaller retained set on the next append.
+func OpenWithLimits(path string, n, m int) (_ *Store, err error) {
+	s := NewWithLimits(n, m)
 	s.path = path
 	if path == "" {
 		return s, nil
 	}
+
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("history: create %s: %w", dir, err)
+		}
+	}
+	lock, err := acquireLock(path)
+	if err != nil {
+		return nil, err
+	}
+	s.lock = lock
+	defer func() {
+		if err != nil {
+			_ = releaseLock(lock)
+		}
+	}()
 
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -148,11 +231,35 @@ func (s *Store) Append(o temporal.Observation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.closed {
+		return ErrClosed
+	}
 	s.insertLocked(o)
 	if s.path == "" {
 		return nil
 	}
 	return s.persistLocked()
+}
+
+// Close releases the single-writer lock held by a file-backed store and leaves
+// the store unusable for appends. A process that exits without calling Close
+// still releases the lock through the OS; Close exists so a test or a graceful
+// shutdown can hand ownership to another writer immediately. It is safe to call
+// more than once and on an in-memory store.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	if s.lock == nil {
+		return nil
+	}
+	lock := s.lock
+	s.lock = nil
+	return releaseLock(lock)
 }
 
 // List returns the observations for one asset, oldest first.
@@ -189,6 +296,23 @@ func (s *Store) RetentionLimit() int {
 	return s.retention
 }
 
+// MaxAssets reports the global cap on assets this store keeps, so an API
+// response can state the bound the whole retained history is read against.
+func (s *Store) MaxAssets() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxAssets
+}
+
+// AssetCount reports how many assets the store currently retains. It is the
+// observable side of the global bound, used by tests and by an operator
+// checking that a file has not grown past its cap.
+func (s *Store) AssetCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.byAsset)
+}
+
 // insertLocked adds one observation and re-applies the retention bound. The
 // caller holds s.mu.
 func (s *Store) insertLocked(o temporal.Observation) {
@@ -203,6 +327,31 @@ func (s *Store) insertLocked(o temporal.Observation) {
 		list = list[len(list)-s.retention:]
 	}
 	s.byAsset[key] = list
+	s.evictAssetsLocked()
+}
+
+// evictAssetsLocked enforces the global asset bound. The caller holds s.mu.
+//
+// The asset whose newest observation is oldest is dropped whole, which is the
+// global analogue of dropping a per-asset observation: the least recently
+// observed asset is the one a consumer is least likely to ask about, and the
+// assets still being scanned keep their full per-asset history. Ties are broken
+// by asset key so eviction cannot depend on Go's map iteration order. An asset
+// is never left half-evicted, because a partial history would read as complete.
+func (s *Store) evictAssetsLocked() {
+	for len(s.byAsset) > s.maxAssets {
+		oldestKey := ""
+		var oldestAt time.Time
+		for key, list := range s.byAsset {
+			// Lists are never empty: insertLocked appends before calling here.
+			latest := list[len(list)-1].At
+			if oldestKey == "" || latest.Before(oldestAt) ||
+				(latest.Equal(oldestAt) && key < oldestKey) {
+				oldestKey, oldestAt = key, latest
+			}
+		}
+		delete(s.byAsset, oldestKey)
+	}
 }
 
 // persistLocked rewrites the log from the retained set. The caller holds s.mu.
@@ -212,15 +361,19 @@ func (s *Store) insertLocked(o temporal.Observation) {
 // compaction: the file is exactly the retained set at all times, which means a
 // restart cannot resurrect observations that retention had already evicted. The
 // write is atomic — a temporary file renamed over the target — so a crash
-// mid-write cannot leave a half-observation in the log.
+// mid-write cannot leave a half-observation in the log. The directory entry
+// created by the rename is synced as well, because on some filesystems the
+// rename itself may not survive a power loss otherwise; docs/history.md records
+// the guarantee and its platform fallback.
 func (s *Store) persistLocked() error {
-	if dir := filepath.Dir(s.path); dir != "" && dir != "." {
+	dir := filepath.Dir(s.path)
+	if dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return fmt.Errorf("history: create %s: %w", dir, err)
 		}
 	}
 
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".history-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".history-*.tmp")
 	if err != nil {
 		return fmt.Errorf("history: create temp log: %w", err)
 	}
@@ -251,6 +404,9 @@ func (s *Store) persistLocked() error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("history: replace %s: %w", s.path, err)
 	}
+	if err := syncDir(dir); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -268,15 +424,19 @@ const logVersion = 1
 // built from. Keeping the two apart means a change to how severity is
 // displayed cannot silently change what the log contains, and it keeps the log
 // independent of mechanics.Severity having a symmetric JSON encoding.
+// Accountability is optional in old logs: a record written before the field
+// existed decodes with an empty value rather than failing to load, which keeps
+// existing histories readable without a version bump.
 type logRecord struct {
-	Version            int                `json:"v"`
-	Asset              mechanics.Asset    `json:"asset"`
-	At                 time.Time          `json:"at"`
-	Mechanics          mechanics.Mechanic `json:"mechanics"`
-	BaseSeverity       uint32             `json:"base_severity"`
-	Severity           uint32             `json:"severity"`
-	Undetermined       bool               `json:"undetermined"`
-	UndeterminedChecks []string           `json:"undetermined_checks,omitempty"`
+	Version            int                      `json:"v"`
+	Asset              mechanics.Asset          `json:"asset"`
+	At                 time.Time                `json:"at"`
+	Mechanics          mechanics.Mechanic       `json:"mechanics"`
+	BaseSeverity       uint32                   `json:"base_severity"`
+	Severity           uint32                   `json:"severity"`
+	Accountability     mechanics.Accountability `json:"accountability,omitempty"`
+	Undetermined       bool                     `json:"undetermined"`
+	UndeterminedChecks []string                 `json:"undetermined_checks,omitempty"`
 }
 
 func record(o temporal.Observation) logRecord {
@@ -287,6 +447,7 @@ func record(o temporal.Observation) logRecord {
 		Mechanics:          o.Mechanics,
 		BaseSeverity:       uint32(o.Base),
 		Severity:           uint32(o.Severity),
+		Accountability:     o.Accountability,
 		Undetermined:       o.Undetermined,
 		UndeterminedChecks: append([]string{}, o.UndeterminedChecks...),
 	}
@@ -299,6 +460,7 @@ func (r logRecord) observation() temporal.Observation {
 		Mechanics:          r.Mechanics,
 		Base:               mechanics.Severity(r.BaseSeverity),
 		Severity:           mechanics.Severity(r.Severity),
+		Accountability:     r.Accountability,
 		Undetermined:       r.Undetermined,
 		UndeterminedChecks: append([]string{}, r.UndeterminedChecks...),
 	}

@@ -47,6 +47,7 @@ The derived difference is reported as these movements:
 | **added bits** | capability bits set in the later observation and clear in the earlier one |
 | **removed bits** | capability bits set in the earlier observation and clear in the later one |
 | **severity movement** | base and final severity before and after, attributed to the axis that moved |
+| **de-escalation** | present exactly when final severity fell, naming the source that withdrew the claim behind it |
 | **accountability movement** | which party publicly claimed the asset before and after, independent of severity |
 | **evidence movement** | claims that changed while the verdict stayed the same |
 
@@ -142,6 +143,82 @@ Attribution is derived from the pair, not guessed from the size of the move:
 
 This is what makes a reputation-only move impossible to attribute to capability:
 the capability test reads base severity, and base did not move.
+
+## De-escalation
+
+Severity can also **fall**, and across reports that is legitimate: when a
+StellarExpert listing is withdrawn the next scan recomputes a lower final
+severity, which is what the scanner can honestly say now. What must not happen is
+that the reversal is invisible — a consumer reading only the current attestation
+sees the lower level with no indication that anything was ever higher, and the
+stored pair alone requires diffing evidence by hand to find out why
+([threat model, class 4](threat-model.md#4-reputation-attribution-age-or-popularity-lowers-a-severity)).
+
+`Deescalation` is the typed form of that fall. `Transition.Deescalation` (and
+`SeverityMovement.Deescalation`) is set **exactly** when final severity fell
+between two complete observations:
+
+| Field | Meaning |
+| --- | --- |
+| `from` / `to` | final severity before and after; `to` is strictly lower |
+| `attribution` | the axis that produced the fall (`reputation`, `capability`, or `both`) |
+| `sources` | the evidence sources that withdrew an escalation-causing claim, sorted and deduplicated |
+| `reason` | plain language: what fell, from where to where, and which sources were observed to withdraw |
+
+`Sources` is populated only from an observed withdrawal, using the two claim
+shapes `internal/mechanics/check_reputation.go` writes: a directory listing
+(`listed as … (domain …, tags: …)`, whose disappearance is an `EvidenceRemoved`
+event, or which keeps its listing but loses the adverse tag in
+`mechanics.AdverseDirectoryTags`, an `EvidenceChanged` event) and a blocklist
+answer (`domain … blocked=true` becoming `blocked=false`, also
+`EvidenceChanged`). An asset list's inclusion claim has no adverse-tag segment
+and is never treated as an escalation, so it can never be named as withdrawing
+one. It is empty when severity fell but no source's
+evidence records a withdrawal — a capability removal lowers severity with no
+source involved — and `reason` then says so rather than letting an empty list
+read as “no source was involved”. A reputation-only fall with no visible
+withdrawal is reported as **unexplained**, not as a confirmed retraction.
+
+Two boundaries follow from the state rule. A comparison that could not be made
+(`unknown` or `missing`) emits **no** de-escalation, because “did not fall” and
+“could not tell” must not render the same. And the fall is a verdict change, so
+`EvidenceTransition` reports it as `verdict_changed` with no events; the
+de-escalation is the headline, not an evidence-only difference beside it.
+
+The sequence
+[`seq7-withdrawn-listing`](../internal/temporal/testdata/seq7-withdrawn-listing/PROVENANCE.md)
+covers it: a curated listing stands in the first observation and is gone in the
+second, base severity never moves, and the transition is a typed de-escalation
+naming `stellar.expert/directory`.
+
+## Accountability movement
+
+A fourth thing can move that neither capability nor severity sees: **who, if
+anyone, publicly claims the asset**. A domain can stop reciprocating a
+`stellar.toml` claim — `verified` → `unverified` — or an issuer can begin
+advertising one — `unknown` → `verified` — with no flag moving at all. Because
+[accountability is reported, never discounted](severity-model.md#rule-3-accountability-is-reported-never-discounted),
+a severity diff cannot express this, and an evidence diff cannot either:
+accountability is a classified verdict on `Report`, not an `Evidence` entry.
+
+`AccountabilityTransition` (and the `accountability` field that `Between`
+writes into every `Transition`) reports:
+
+| Field | Meaning |
+| --- | --- |
+| `from` / `to` | the two accountability values, ordered by observation time like the pair itself |
+| `changed` | whether they differ; meaningful only when `state` is `valid` |
+| `state` / `reason` | the same `valid` / `unknown` / `missing` answer as the pair, with a plain-language reason when it is not valid |
+
+An empty difference is still not a no-answer: on `unknown` or `missing`, `from`
+and `to` stay empty and `changed` is false, because a source that did not answer
+could have hidden exactly the claim change being asked about. This is the same
+propagation every other detector inherits from `Between` — see
+[Handling undetermined observations](#handling-undetermined-observations). The
+detector is exercised over every committed fixture sequence in
+`internal/temporal/testdata`, including the undetermined one and a synthetic
+`verified` → `unverified` pair, and the movement is surfaced on every entry of
+`GET /api/v1/history`'s `transitions` array ([history.md](history.md)).
 
 ## Evidence-only changes
 
@@ -290,8 +367,15 @@ publishes these comparisons live in [history.md](history.md), not here.
   are tested where they live:
   `go test ./internal/temporal/ -run Addition -v`,
   `go test ./internal/temporal/ -run Removal -v`,
-  `go test ./internal/temporal/ -run Severity -v`,
-  `go test ./internal/temporal/ -run Evidence -v`.
+   `go test ./internal/temporal/ -run Severity -v`,
+   `go test ./internal/temporal/ -run Deescalation -v`,
+   `go test ./internal/temporal/ -run Accountability -v`,
+   `go test ./internal/temporal/ -run Evidence -v`.
+
+The de-escalation case is pinned by
+`TestDeescalationWithdrawnListing` (unit) and
+`TestSequencesProduceExpectedTransitions/seq7-withdrawn-listing` (committed
+fixture), which threat model class 4 cites.
 
 ## Verification
 
